@@ -3,9 +3,11 @@ import { defineStore } from 'pinia';
 import type { CloudPlanState } from '@/Interface';
 import { useRootStore } from '@/stores/n8nRoot.store';
 import { useSettingsStore } from '@/stores/settings.store';
+import { useUIStore } from '@/stores/ui.store';
 import { useUsersStore } from '@/stores/users.store';
 import { getCurrentPlan, getCurrentUsage } from '@/api/cloudPlans';
 import { DateTime } from 'luxon';
+import { CLOUD_TRIAL_CHECK_INTERVAL, STORES } from '@/constants';
 
 const DEFAULT_STATE: CloudPlanState = {
 	data: null,
@@ -13,7 +15,7 @@ const DEFAULT_STATE: CloudPlanState = {
 	loadingPlan: false,
 };
 
-export const useCloudPlanStore = defineStore('cloudPlan', () => {
+export const useCloudPlanStore = defineStore(STORES.CLOUD_PLAN, () => {
 	const rootStore = useRootStore();
 	const settingsStore = useSettingsStore();
 	const usersStore = useUsersStore();
@@ -26,6 +28,11 @@ export const useCloudPlanStore = defineStore('cloudPlan', () => {
 
 	const setUsage = (data: CloudPlanState['usage']) => {
 		state.usage = data;
+	};
+
+	const reset = () => {
+		state.data = null;
+		state.usage = null;
 	};
 
 	const userIsTrialing = computed(() => state.data?.metadata?.group === 'trial');
@@ -56,6 +63,21 @@ export const useCloudPlanStore = defineStore('cloudPlan', () => {
 			plan = await getCurrentPlan(rootStore.getRestApiContext);
 			state.data = plan;
 			state.loadingPlan = false;
+
+			if (userIsTrialing.value) {
+				if (trialExpired.value) {
+					useUIStore().pushBannerToStack('TRIAL_OVER');
+				} else {
+					useUIStore().pushBannerToStack('TRIAL');
+				}
+			}
+
+			if (useUsersStore().isInstanceOwner) {
+				await usersStore.fetchUserCloudAccount();
+				if (!usersStore.currentUserCloudInfo?.confirmed) {
+					useUIStore().pushBannerToStack('EMAIL_CONFIRMATION');
+				}
+			}
 		} catch (error) {
 			state.loadingPlan = false;
 			throw new Error(error);
@@ -89,6 +111,27 @@ export const useCloudPlanStore = defineStore('cloudPlan', () => {
 		return Math.ceil(differenceInDays);
 	});
 
+	const startPollingInstanceUsageData = () => {
+		const interval = setInterval(async () => {
+			try {
+				await getInstanceCurrentUsage();
+				if (trialExpired.value || allExecutionsUsed.value) {
+					clearTimeout(interval);
+					return;
+				}
+			} catch {}
+		}, CLOUD_TRIAL_CHECK_INTERVAL);
+	};
+
+	const checkForCloudPlanData = async (): Promise<void> => {
+		try {
+			await getOwnerCurrentPlan();
+			if (!userIsTrialing.value) return;
+			await getInstanceCurrentUsage();
+			startPollingInstanceUsageData();
+		} catch {}
+	};
+
 	return {
 		state,
 		getOwnerCurrentPlan,
@@ -100,5 +143,7 @@ export const useCloudPlanStore = defineStore('cloudPlan', () => {
 		currentUsageData,
 		trialExpired,
 		allExecutionsUsed,
+		reset,
+		checkForCloudPlanData,
 	};
 });

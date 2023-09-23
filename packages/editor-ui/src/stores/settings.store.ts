@@ -31,7 +31,6 @@ import { useUIStore } from './ui.store';
 import { useUsersStore } from './users.store';
 import { useVersionsStore } from './versions.store';
 import { makeRestApiRequest } from '@/utils';
-import { useCloudPlanStore } from './cloudPlan.store';
 
 export const useSettingsStore = defineStore(STORES.SETTINGS, {
 	state: (): ISettingsState => ({
@@ -59,6 +58,9 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, {
 		saml: {
 			loginLabel: '',
 			loginEnabled: false,
+		},
+		mfa: {
+			enabled: false,
 		},
 		onboardingCallPromptEnabled: false,
 		saveDataErrorExecution: 'all',
@@ -133,6 +135,9 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, {
 		isTelemetryEnabled(): boolean {
 			return this.settings.telemetry && this.settings.telemetry.enabled;
 		},
+		isMfaFeatureEnabled(): boolean {
+			return this.settings?.mfa?.enabled;
+		},
 		areTagsEnabled(): boolean {
 			return this.settings.workflowTagsDisabled !== undefined
 				? !this.settings.workflowTagsDisabled
@@ -198,6 +203,17 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, {
 				this.saml.loginEnabled = settings.sso.saml.loginEnabled;
 				this.saml.loginLabel = settings.sso.saml.loginLabel;
 			}
+			if (settings.enterprise?.showNonProdBanner) {
+				useUIStore().pushBannerToStack('NON_PRODUCTION_LICENSE');
+			}
+			if (settings.versionCli) {
+				useRootStore().setVersionCli(settings.versionCli);
+			}
+
+			const isV1BannerDismissedPermanently = (settings.banners?.dismissed || []).includes('V1');
+			if (!isV1BannerDismissedPermanently && useRootStore().versionCli.startsWith('1.')) {
+				useUIStore().pushBannerToStack('V1');
+			}
 		},
 		async getSettings(): Promise<void> {
 			const rootStore = useRootStore();
@@ -223,15 +239,6 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, {
 			rootStore.setN8nMetadata(settings.n8nMetadata || {});
 			rootStore.setDefaultLocale(settings.defaultLocale);
 			rootStore.setIsNpmAvailable(settings.isNpmAvailable);
-
-			const isV1BannerDismissedPermanently = settings.banners.dismissed.includes('V1');
-			if (
-				!isV1BannerDismissedPermanently &&
-				useRootStore().versionCli.startsWith('1.') &&
-				!useCloudPlanStore().userIsTrialing
-			) {
-				useUIStore().showBanner('V1');
-			}
 
 			useVersionsStore().setVersionNotificationSettings(settings.versionNotifications);
 		},
@@ -351,3 +358,5 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, {
 		},
 	},
 });
+
+export { useUsersStore };

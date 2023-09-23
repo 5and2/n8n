@@ -78,6 +78,7 @@ const versionDescription: INodeTypeDescription = {
 			noDataExpression: true,
 			typeOptions: {
 				editor: 'sqlEditor',
+				rows: 5,
 				sqlDialect: 'MySQL',
 			},
 			displayOptions: {
@@ -421,6 +422,6 @@ export class MySqlV1 implements INodeType {
 
 		await connection.end();
 
-		return this.prepareOutputData(returnItems);
+		return [returnItems];
 	}
 }

@@ -26,7 +26,7 @@ import type { RequestOptions } from 'oauth-1.0a';
 import clientOAuth1 from 'oauth-1.0a';
 
 import {
-	BinaryDataManager,
+	BinaryDataService,
 	Credentials,
 	LoadMappingOptions,
 	LoadNodeParameterOptions,
@@ -66,6 +66,7 @@ import {
 	GENERATED_STATIC_DIR,
 	inDevelopment,
 	inE2ETests,
+	LICENSE_FEATURES,
 	N8N_VERSION,
 	RESPONSE_ERROR_MESSAGES,
 	TEMPLATES_DIR,
@@ -87,6 +88,7 @@ import {
 	AuthController,
 	LdapController,
 	MeController,
+	MFAController,
 	NodesController,
 	NodeTypesController,
 	OwnerController,
@@ -97,6 +99,7 @@ import {
 	WorkflowStatisticsController,
 } from '@/controllers';
 
+import { ExternalSecretsController } from '@/ExternalSecrets/ExternalSecrets.controller.ee';
 import { executionsController } from '@/executions/executions.controller';
 import { isApiEnabled, loadPublicApiVersions } from '@/PublicApi';
 import {
@@ -129,6 +132,7 @@ import * as WebhookHelpers from '@/WebhookHelpers';
 import * as WorkflowExecuteAdditionalData from '@/WorkflowExecuteAdditionalData';
 import { toHttpNodeParameters } from '@/CurlConverterHelper';
 import { EventBusController } from '@/eventbus/eventBus.controller';
+import { EventBusControllerEE } from '@/eventbus/eventBus.controller.ee';
 import { isLogStreamingEnabled } from '@/eventbus/MessageEventBus/MessageEventBusHelper';
 import { licenseController } from './license/license.controller';
 import { Push, setupPushServer, setupPushHandler } from '@/push';
@@ -161,13 +165,19 @@ import {
 	isLdapCurrentAuthenticationMethod,
 	isSamlCurrentAuthenticationMethod,
 } from './sso/ssoHelpers';
+import { isExternalSecretsEnabled } from './ExternalSecrets/externalSecretsHelper.ee';
 import { isSourceControlLicensed } from '@/environments/sourceControl/sourceControlHelper.ee';
 import { SourceControlService } from '@/environments/sourceControl/sourceControl.service.ee';
 import { SourceControlController } from '@/environments/sourceControl/sourceControl.controller.ee';
-import { ExecutionRepository } from '@db/repositories';
+import { ExecutionRepository, SettingsRepository } from '@db/repositories';
 import type { ExecutionEntity } from '@db/entities/ExecutionEntity';
+import { TOTPService } from './Mfa/totp.service';
+import { MfaService } from './Mfa/mfa.service';
+import { handleMfaDisable, isMfaFeatureEnabled } from './Mfa/helpers';
 import { JwtService } from './services/jwt.service';
 import { RoleService } from './services/role.service';
+import { UserService } from './services/user.service';
+import { OrchestrationController } from './controllers/orchestration.controller';
 
 const exec = promisify(callbackExec);
 
@@ -191,6 +201,8 @@ export class Server extends AbstractServer {
 	postHog: PostHogClient;
 
 	push: Push;
+
+	binaryDataService: BinaryDataService;
 
 	constructor() {
 		super('main');
@@ -311,7 +323,13 @@ export class Server extends AbstractServer {
 				variables: false,
 				sourceControl: false,
 				auditLogs: false,
+				externalSecrets: false,
+				showNonProdBanner: false,
 				debugInEditor: false,
+				workflowHistory: false,
+			},
+			mfa: {
+				enabled: false,
 			},
 			hideUsagePage: config.getEnv('hideUsagePage'),
 			license: {
@@ -320,8 +338,14 @@ export class Server extends AbstractServer {
 			variables: {
 				limit: 0,
 			},
+			expressions: {
+				evaluator: config.getEnv('expression.evaluator'),
+			},
 			banners: {
 				dismissed: [],
+			},
+			ai: {
+				enabled: config.getEnv('ai.enabled'),
 			},
 		};
 	}
@@ -339,6 +363,7 @@ export class Server extends AbstractServer {
 		this.endpointPresetCredentials = config.getEnv('credentials.overwrite.endpoint');
 
 		this.push = Container.get(Push);
+		this.binaryDataService = Container.get(BinaryDataService);
 
 		await super.start();
 		LoggerProxy.debug(`Server ID: ${this.uniqueInstanceId}`);
@@ -377,7 +402,6 @@ export class Server extends AbstractServer {
 				),
 				executions_data_prune: config.getEnv('executions.pruneData'),
 				executions_data_max_age: config.getEnv('executions.pruneDataMaxAge'),
-				executions_data_prune_timeout: config.getEnv('executions.pruneDataTimeout'),
 			},
 			deploymentType: config.getEnv('deployment.type'),
 			binaryDataMode: binaryDataConfig.mode,
@@ -441,6 +465,10 @@ export class Server extends AbstractServer {
 			advancedExecutionFilters: isAdvancedExecutionFiltersEnabled(),
 			variables: isVariablesEnabled(),
 			sourceControl: isSourceControlLicensed(),
+			externalSecrets: isExternalSecretsEnabled(),
+			showNonProdBanner: Container.get(License).isFeatureEnabled(
+				LICENSE_FEATURES.SHOW_NON_PROD_BANNER,
+			),
 			debugInEditor: isDebugInEditorLicensed(),
 		});
 
@@ -465,6 +493,9 @@ export class Server extends AbstractServer {
 		if (config.get('nodes.packagesMissing').length > 0) {
 			this.frontendSettings.missingPackages = true;
 		}
+
+		this.frontendSettings.mfa.enabled = isMfaFeatureEnabled();
+
 		return this.frontendSettings;
 	}
 
@@ -473,44 +504,61 @@ export class Server extends AbstractServer {
 		const repositories = Db.collections;
 		setupAuthMiddlewares(app, ignoredEndpoints, this.restEndpoint);
 
+		const encryptionKey = await UserSettings.getEncryptionKey();
+
 		const logger = LoggerProxy;
 		const internalHooks = Container.get(InternalHooks);
 		const mailer = Container.get(UserManagementMailer);
-		const postHog = this.postHog;
+		const userService = Container.get(UserService);
 		const jwtService = Container.get(JwtService);
+		const postHog = this.postHog;
+		const mfaService = new MfaService(repositories.User, new TOTPService(), encryptionKey);
 
 		const controllers: object[] = [
 			new EventBusController(),
-			new AuthController({ config, internalHooks, repositories, logger, postHog }),
-			new OwnerController({ config, internalHooks, repositories, logger }),
-			new MeController({ externalHooks, internalHooks, repositories, logger }),
-			new NodeTypesController({ config, nodeTypes }),
-			new PasswordResetController({
+			new EventBusControllerEE(),
+			new AuthController(config, logger, internalHooks, mfaService, userService, postHog),
+			new OwnerController(
 				config,
+				logger,
+				internalHooks,
+				Container.get(SettingsRepository),
+				userService,
+				postHog,
+			),
+			new MeController(logger, externalHooks, internalHooks, userService),
+			new NodeTypesController(config, nodeTypes),
+			new PasswordResetController(
+				config,
+				logger,
 				externalHooks,
 				internalHooks,
 				mailer,
-				repositories,
-				logger,
+				userService,
 				jwtService,
-			}),
+				mfaService,
+			),
 			Container.get(TagsController),
 			new TranslationController(config, this.credentialTypes),
-			new UsersController({
+			new UsersController(
 				config,
-				mailer,
+				logger,
 				externalHooks,
 				internalHooks,
-				repositories,
+				repositories.SharedCredentials,
+				repositories.SharedWorkflow,
 				activeWorkflowRunner,
-				logger,
-				postHog,
+				mailer,
 				jwtService,
-				roleService: Container.get(RoleService),
-			}),
+				Container.get(RoleService),
+				userService,
+				postHog,
+			),
 			Container.get(SamlController),
 			Container.get(SourceControlController),
 			Container.get(WorkflowStatisticsController),
+			Container.get(ExternalSecretsController),
+			Container.get(OrchestrationController),
 		];
 
 		if (isLdapEnabled()) {
@@ -528,6 +576,10 @@ export class Server extends AbstractServer {
 			// eslint-disable-next-line @typescript-eslint/naming-convention
 			const { E2EController } = await import('./controllers/e2e.controller');
 			controllers.push(Container.get(E2EController));
+		}
+
+		if (isMfaFeatureEnabled()) {
+			controllers.push(new MFAController(mfaService));
 		}
 
 		controllers.forEach((controller) => registerController(app, config, controller));
@@ -606,6 +658,8 @@ export class Server extends AbstractServer {
 		}
 
 		await handleLdapInit();
+
+		await handleMfaDisable();
 
 		await this.registerControllers(ignoredEndpoints);
 
@@ -908,10 +962,13 @@ export class Server extends AbstractServer {
 					throw new ResponseHelper.InternalServerError(error.message);
 				}
 
+				const additionalData = await WorkflowExecuteAdditionalData.getBase(req.user.id);
+
 				const mode: WorkflowExecuteMode = 'internal';
 				const timezone = config.getEnv('generic.timezone');
 				const credentialsHelper = new CredentialsHelper(encryptionKey);
 				const decryptedDataOriginal = await credentialsHelper.getDecrypted(
+					additionalData,
 					credential as INodeCredentialsDetails,
 					credential.type,
 					mode,
@@ -920,6 +977,7 @@ export class Server extends AbstractServer {
 				);
 
 				const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
+					additionalData,
 					decryptedDataOriginal,
 					credential.type,
 					mode,
@@ -1054,10 +1112,13 @@ export class Server extends AbstractServer {
 						throw new ResponseHelper.InternalServerError(error.message);
 					}
 
+					const additionalData = await WorkflowExecuteAdditionalData.getBase(req.user.id);
+
 					const mode: WorkflowExecuteMode = 'internal';
 					const timezone = config.getEnv('generic.timezone');
 					const credentialsHelper = new CredentialsHelper(encryptionKey);
 					const decryptedDataOriginal = await credentialsHelper.getDecrypted(
+						additionalData,
 						credential as INodeCredentialsDetails,
 						credential.type,
 						mode,
@@ -1065,6 +1126,7 @@ export class Server extends AbstractServer {
 						true,
 					);
 					const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
+						additionalData,
 						decryptedDataOriginal,
 						credential.type,
 						mode,
@@ -1199,9 +1261,8 @@ export class Server extends AbstractServer {
 							Object.assign(findOptions.where, { workflowId: In(sharedWorkflowIds) });
 						}
 
-						const executions = await Container.get(ExecutionRepository).findMultipleExecutions(
-							findOptions,
-						);
+						const executions =
+							await Container.get(ExecutionRepository).findMultipleExecutions(findOptions);
 
 						if (!executions.length) return [];
 
@@ -1369,13 +1430,12 @@ export class Server extends AbstractServer {
 			async (req: BinaryDataRequest, res: express.Response): Promise<void> => {
 				// TODO UM: check if this needs permission check for UM
 				const identifier = req.params.path;
-				const binaryDataManager = BinaryDataManager.getInstance();
 				try {
-					const binaryPath = binaryDataManager.getBinaryPath(identifier);
+					const binaryPath = this.binaryDataService.getPath(identifier);
 					let { mode, fileName, mimeType } = req.query;
 					if (!fileName || !mimeType) {
 						try {
-							const metadata = await binaryDataManager.getBinaryMetadata(identifier);
+							const metadata = await this.binaryDataService.getMetadata(identifier);
 							fileName = metadata.fileName;
 							mimeType = metadata.mimeType;
 							res.setHeader('Content-Length', metadata.fileSize);
@@ -1414,7 +1474,9 @@ export class Server extends AbstractServer {
 		// ----------------------------------------
 
 		if (!eventBus.isInitialized) {
-			await eventBus.initialize();
+			await eventBus.initialize({
+				uniqueInstanceId: this.uniqueInstanceId,
+			});
 		}
 
 		if (this.endpointPresetCredentials !== '') {

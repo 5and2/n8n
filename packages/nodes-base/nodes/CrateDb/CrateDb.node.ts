@@ -76,6 +76,7 @@ export class CrateDb implements INodeType {
 				noDataExpression: true,
 				typeOptions: {
 					editor: 'sqlEditor',
+					rows: 5,
 					sqlDialect: 'PostgreSQL',
 				},
 				displayOptions: {
@@ -387,6 +388,6 @@ export class CrateDb implements INodeType {
 		// Close the connection
 		pgp.end();
 
-		return this.prepareOutputData(returnItems);
+		return [returnItems];
 	}
 }

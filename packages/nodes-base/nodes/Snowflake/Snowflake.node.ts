@@ -69,6 +69,7 @@ export class Snowflake implements INodeType {
 				noDataExpression: true,
 				typeOptions: {
 					editor: 'sqlEditor',
+					rows: 5,
 				},
 				displayOptions: {
 					show: {
@@ -250,6 +251,6 @@ export class Snowflake implements INodeType {
 		}
 
 		await destroy(connection);
-		return this.prepareOutputData(returnData);
+		return [returnData];
 	}
 }

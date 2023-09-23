@@ -411,7 +411,16 @@ export class Html implements INodeType {
 			table += '</tbody>';
 			table += '</table>';
 
-			return this.prepareOutputData([{ json: { table } }]);
+			return [
+				[
+					{
+						json: { table },
+						pairedItem: items.map((_item, index) => ({
+							item: index,
+						})),
+					},
+				],
+			];
 		}
 
 		let item: INodeExecutionData;
@@ -528,6 +537,6 @@ export class Html implements INodeType {
 			}
 		}
 
-		return this.prepareOutputData(returnData);
+		return [returnData];
 	}
 }

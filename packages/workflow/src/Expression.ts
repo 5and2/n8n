@@ -1,7 +1,8 @@
-import * as tmpl from '@n8n_io/riot-tmpl';
 import { DateTime, Duration, Interval } from 'luxon';
+import * as tmpl from '@n8n_io/riot-tmpl';
 
 import type {
+	IDataObject,
 	IExecuteData,
 	INode,
 	INodeExecutionData,
@@ -21,6 +22,7 @@ import type { Workflow } from './Workflow';
 import { extend, extendOptional } from './Extensions';
 import { extendedFunctions } from './Extensions/ExtendedFunctions';
 import { extendSyntax } from './Extensions/ExpressionExtension';
+import { evaluateExpression, setErrorHandler } from './ExpressionEvaluatorProxy';
 
 const IS_FRONTEND_IN_DEV_MODE =
 	typeof process === 'object' &&
@@ -39,13 +41,10 @@ export const isExpressionError = (error: unknown): error is ExpressionError =>
 export const isTypeError = (error: unknown): error is TypeError =>
 	error instanceof TypeError || (error instanceof Error && error.name === 'TypeError');
 
-// Set it to use double curly brackets instead of single ones
-tmpl.brackets.set('{{ }}');
-
 // Make sure that error get forwarded
-tmpl.tmpl.errorHandler = (error: Error) => {
+setErrorHandler((error: Error) => {
 	if (isExpressionError(error)) throw error;
-};
+});
 
 // eslint-disable-next-line @typescript-eslint/naming-convention
 const AsyncFunction = (async () => {}).constructor as FunctionConstructor;
@@ -66,8 +65,8 @@ export class Expression {
 		this.workflow = workflow;
 	}
 
-	static resolveWithoutWorkflow(expression: string) {
-		return tmpl.tmpl(expression, {});
+	static resolveWithoutWorkflow(expression: string, data: IDataObject = {}) {
+		return tmpl.tmpl(expression, data);
 	}
 
 	/**
@@ -338,7 +337,7 @@ export class Expression {
 			[Function, AsyncFunction].forEach(({ prototype }) =>
 				Object.defineProperty(prototype, 'constructor', { value: fnConstructors.mock }),
 			);
-			return tmpl.tmpl(expression, data);
+			return evaluateExpression(expression, data);
 		} catch (error) {
 			if (isExpressionError(error)) throw error;
 
