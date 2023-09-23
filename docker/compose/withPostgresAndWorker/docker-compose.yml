@@ -30,9 +30,6 @@ x-shared: &shared
       condition: service_healthy
     postgres:
       condition: service_healthy
-  networks:
-    cloudflare_default:
-      external: true      
 
 services:
   postgres:
