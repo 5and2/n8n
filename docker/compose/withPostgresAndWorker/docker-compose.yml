@@ -23,11 +23,16 @@ x-shared: &shared
     - redis
   volumes:
     - n8n_storage:/home/node/.n8n
+  networks:
+    - cloudflare_default    
   depends_on:
     redis:
       condition: service_healthy
     postgres:
       condition: service_healthy
+  networks:
+    cloudflare_default:
+      external: true      
 
 services:
   postgres:
