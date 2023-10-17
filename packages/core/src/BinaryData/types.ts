@@ -1,44 +1,70 @@
 import type { Readable } from 'stream';
-import type { BinaryMetadata } from 'n8n-workflow';
-import type { BINARY_DATA_MODES } from './utils';
 
 export namespace BinaryData {
-	export type Mode = (typeof BINARY_DATA_MODES)[number];
+	type LegacyMode = 'filesystem';
+
+	type UpgradedMode = 'filesystem-v2';
+
+	/**
+	 * Binary data mode selectable by user via env var config.
+	 */
+	export type ConfigMode = 'default' | 'filesystem' | 's3';
+
+	/**
+	 * Binary data mode used internally by binary data service. User-selected
+	 * legacy modes are replaced with upgraded modes.
+	 */
+	export type ServiceMode = Exclude<ConfigMode, LegacyMode> | UpgradedMode;
+
+	/**
+	 * Binary data mode in binary data ID in stored execution data. Both legacy
+	 * and upgraded modes may be present, except default in-memory mode.
+	 */
+	export type StoredMode = Exclude<ConfigMode | UpgradedMode, 'default'>;
 
 	export type Config = {
-		mode: 'default' | 'filesystem';
-		availableModes: string[];
+		mode: ConfigMode;
+		availableModes: ConfigMode[];
 		localStoragePath: string;
 	};
+
+	export type Metadata = {
+		fileName?: string;
+		mimeType?: string;
+		fileSize: number;
+	};
+
+	export type WriteResult = { fileId: string; fileSize: number };
+
+	export type PreWriteMetadata = Omit<Metadata, 'fileSize'>;
+
+	export type IdsForDeletion = Array<{ workflowId: string; executionId: string }>;
 
 	export interface Manager {
 		init(): Promise<void>;
 
-		store(binaryData: Buffer | Readable, executionId: string): Promise<string>;
-		getPath(identifier: string): string;
+		store(
+			workflowId: string,
+			executionId: string,
+			bufferOrStream: Buffer | Readable,
+			metadata: PreWriteMetadata,
+		): Promise<WriteResult>;
 
-		// @TODO: Refactor to use identifier
-		getSize(path: string): Promise<number>;
+		getPath(fileId: string): string;
+		getAsBuffer(fileId: string): Promise<Buffer>;
+		getAsStream(fileId: string, chunkSize?: number): Promise<Readable>;
+		getMetadata(fileId: string): Promise<Metadata>;
 
-		getBuffer(identifier: string): Promise<Buffer>;
-		getStream(identifier: string, chunkSize?: number): Readable;
+		deleteMany(ids: IdsForDeletion): Promise<void>;
 
-		// @TODO: Refactor out - not needed for object storage
-		storeMetadata(identifier: string, metadata: BinaryMetadata): Promise<void>;
+		copyByFileId(workflowId: string, executionId: string, sourceFileId: string): Promise<string>;
+		copyByFilePath(
+			workflowId: string,
+			executionId: string,
+			sourcePath: string,
+			metadata: PreWriteMetadata,
+		): Promise<WriteResult>;
 
-		// @TODO: Refactor out - not needed for object storage
-		getMetadata(identifier: string): Promise<BinaryMetadata>;
-
-		// @TODO: Refactor to also use `workflowId` to support full path-like identifier:
-		// `workflows/{workflowId}/executions/{executionId}/binary_data/{fileId}`
-		copyByPath(path: string, executionId: string): Promise<string>;
-
-		copyByIdentifier(identifier: string, prefix: string): Promise<string>;
-
-		deleteOne(identifier: string): Promise<void>;
-
-		// @TODO: Refactor to also receive `workflowId` to support full path-like identifier:
-		// `workflows/{workflowId}/executions/{executionId}/binary_data/{fileId}`
-		deleteManyByExecutionIds(executionIds: string[]): Promise<string[]>;
+		rename(oldFileId: string, newFileId: string): Promise<void>;
 	}
 }

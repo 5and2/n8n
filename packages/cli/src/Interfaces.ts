@@ -348,6 +348,9 @@ export interface IDiagnosticInfo {
 	smtp_set_up: boolean;
 	ldap_allowed: boolean;
 	saml_enabled: boolean;
+	binary_data_s3: boolean;
+	licensePlanName?: string;
+	licenseTenantId?: number;
 }
 
 export interface ITelemetryUserDeletionData {
